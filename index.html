@@ -1759,6 +1759,7 @@ function renderPanel(){
     <div class="adm-bar">
       <div class="adm-tabs" role="group" aria-label="Ver">
         ${tabBtn("all","Todos")}${tabBtn("Disponible","Disponibles")}${tabBtn("Apartado","Apartados")}${tabBtn("Vendido","Vendidos")}${tabBtn("leads","Solicitudes nuevas")}
+        <button type="button" class="chip" data-tab="precio" aria-pressed="${admTab==="precio"}">Comparar precio</button>
       </div>
       <div class="adm-actions">
         <button type="button" class="btn btn-accent" id="newCar">+ Nueva publicación</button>
@@ -1774,7 +1775,43 @@ function renderPanel(){
       <div class="adm-actions"><button class="btn btn-accent" type="submit"${busy?" disabled":""}>${busy ? "Guardando…" : e ? "Guardar cambios" : "Publicar coche"}</button><button type="button" class="btn btn-ghost" id="cancelEdit">Cancelar</button></div>
       <p class="msg warn" id="cfMsg" hidden></p>
     </form>` : ""}
-    ${admTab === "leads" ? leadTable() : carTable()}`;
+    ${admTab === "leads" ? leadTable() : admTab === "precio" ? comparadorPanel() : carTable()}`;
+}
+
+// ---- Comparador de precio contra Mercado Libre (v1.1) ----
+// La consulta a Apify la hace la función de Supabase "comparar-precio" (el token vive allá, no aquí).
+let cmp = { vals: { marca: "", modelo: "", anio: "", kilometraje: "", precio_vendedor: "" }, res: null, busy: false };
+const precioValido = v => { const s = String(v ?? "").trim().replace(/^\$\s*/, "").replace(/[\s,]/g, ""); return /^\d+(\.\d{1,2})?$/.test(s) && Number(s) > 0; };
+function comparadorPanel(){
+  const v = cmp.vals, r = cmp.res;
+  const inp = (k, l, extra = "") => `<label>${l}<input id="cp-${k}" value="${esc(v[k])}" ${extra}></label>`;
+  const tono = r && (r.estado === "arriba" || r.estado === "abajo" || r.estado === "en_linea") ? "" : "warn";
+  const detalle = r && r.referencia ? `<p class="adm-sub" style="margin-top:6px">Precio del vendedor <b class="mono">${mxn(r.precio_vendedor)}</b> · mediana de ${r.anuncios} anuncios en Mercado Libre <b class="mono">${mxn(Math.round(r.referencia))}</b>${r.estado !== "en_linea" ? ` · diferencia <b class="mono">${mxn(Math.round(r.diferencia))}</b>` : ""}</p>` : "";
+  return `
+    <form class="adm-card adm-form" id="cmpForm" novalidate>
+      <h2>Comparar precio con Mercado Libre</h2>
+      <p class="adm-sub">Busca anuncios de la misma marca, modelo y año en Mercado Libre México y compara el precio del vendedor con la mediana del mercado. La consulta puede tardar hasta un minuto.</p>
+      <div class="adm-fields">
+        ${inp("marca", "Marca *", 'autocomplete="off"')}${inp("modelo", "Modelo *", 'autocomplete="off"')}
+        ${inp("anio", "Año *", 'inputmode="numeric"')}${inp("kilometraje", "Kilometraje *", 'inputmode="numeric"')}
+        ${inp("precio_vendedor", "Precio del vendedor (MXN) *", 'inputmode="decimal" placeholder="350000"')}
+      </div>
+      <div class="adm-actions"><button class="btn btn-accent" type="submit"${cmp.busy ? " disabled" : ""}>${cmp.busy ? "Consultando Mercado Libre…" : "Comparar precio"}</button></div>
+      ${r ? `<div class="msg ${tono}" id="cmpRes" role="status"><b>${esc(r.mensaje)}</b>${r.diferencia && r.estado !== "en_linea" ? ` por <b class="mono">${mxn(Math.round(r.diferencia))}</b>` : ""}${detalle}</div>` : ""}
+    </form>`;
+}
+async function enviarComparacion(f){
+  ["marca","modelo","anio","kilometraje","precio_vendedor"].forEach(k => { cmp.vals[k] = f.querySelector("#cp-" + k).value.trim(); });
+  const v = cmp.vals;
+  if (!precioValido(v.precio_vendedor)) { cmp.res = { estado: "precio_invalido", mensaje: "Revisa el precio del vendedor: escribe solo números mayores a cero, por ejemplo 350000." }; renderPanel(); document.getElementById("cp-precio_vendedor").focus(); return; }
+  if (!v.marca || !v.modelo || !/^\d{4}$/.test(v.anio) || !/^[\d,\s]+$/.test(v.kilometraje)) { cmp.res = { estado: "datos_invalidos", mensaje: "Revisa marca, modelo, año y kilometraje." }; renderPanel(); return; }
+  cmp.busy = true; cmp.res = null; renderPanel();
+  try {
+    const { data, error } = await sb.functions.invoke("comparar-precio", { body: v });
+    cmp.res = !error && data && data.mensaje ? data : { estado: "sin_respuesta", mensaje: "No se pudo consultar el precio, intenta más tarde" };
+  } catch { cmp.res = { estado: "sin_respuesta", mensaje: "No se pudo consultar el precio, intenta más tarde" }; }
+  cmp.busy = false;
+  if (curPage === "admin" && admTab === "precio") renderPanel();
 }
 
 function flash(text, warn=false){ admMsg = {text, warn}; renderPanel(); setTimeout(() => { if (admMsg && admMsg.text === text) { admMsg = null; if (curPage==="admin" && isAdmin && !editing) renderPanel(); } }, 5000); }
@@ -1807,6 +1844,7 @@ const admBox = document.getElementById("admBox");
 admBox.addEventListener("submit", async ev => {
   ev.preventDefault();
   const f = ev.target;
+  if (f.id === "cmpForm") { if (!cmp.busy) await enviarComparacion(f); return; }
   if (f.id === "loginForm") {
     const m = f.querySelector("#liMsg"); m.hidden = false; m.textContent = "Entrando…";
     const { error } = await sb.auth.signInWithPassword({ email: f.querySelector("#li-user").value.trim(), password: f.querySelector("#li-pw").value });
